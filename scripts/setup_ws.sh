@@ -28,6 +28,13 @@ if ! patch -p1 -d "$SRC/brain" --forward --silent < "$ROOT/patches/brain-clang.p
   exit 1
 fi
 
+# Optional: publish brain's decision on /brain/decision so the viewer overlay never misses a change
+# (brain's own /speak announcements are rate-limited). The overlay falls back to /speak without it.
+if ! patch -p1 -d "$SRC/brain" --forward --silent < "$ROOT/patches/brain-decision-topic.patch"; then
+  echo "warning: patches/brain-decision-topic.patch no longer applies; the viewer overlay will use /speak instead." >&2
+  rm -f "$SRC"/brain/src/brain.cpp.rej "$SRC"/brain/src/brain.cpp.orig
+fi
+
 # The build only needs the Booster SDK headers. Use $SDK_ZIP (a sdk_release.zip) if you set one,
 # otherwise take them from Booster's public SDK repo.
 if [ ! -d "$ROOT/vendor/booster_sdk/include/booster" ]; then

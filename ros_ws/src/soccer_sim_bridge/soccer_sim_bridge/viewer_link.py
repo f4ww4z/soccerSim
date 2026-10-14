@@ -4,10 +4,11 @@ Drawing the viewer inside the sim process makes the two fight over the GIL and t
 the GL driver the head camera needs), and the sim then falls well below real time. Here the sim only writes the
 robot/ball pose (qpos); the viewer process replays it with mj_forward and hands the shot sliders back.
 
-State file layout (float64):
+State file layout (float64 header, then utf-8 text):
     [0]               sim heartbeat (counts up on every write)
     [1 : 1 + nq]      qpos, sim -> viewer
     [1 + nq : ...]    slider values (ctrl[n_robot:]), viewer -> sim
+    [... : +TEXT]     overlay: two utf-8 columns joined by a NUL byte, NUL padded; sim -> viewer
 """
 
 import os
@@ -18,16 +19,31 @@ import time
 
 import numpy as np
 
+TEXT_BYTES = 2048
+
 
 class _State:
     def __init__(self, path: str, nq: int, n_sliders: int, create: bool):
         n_float = 1 + nq + n_sliders
+        size = n_float * 8 + TEXT_BYTES
         if create:
             with open(path, "wb") as f:
-                f.truncate(n_float * 8)
-        self.floats = np.memmap(path, dtype=np.float64, mode="r+", shape=(n_float,))
+                f.truncate(size)
+        mm = np.memmap(path, dtype=np.uint8, mode="r+", shape=(size,))
+        self._mm = mm
+        self.floats = mm[: n_float * 8].view(np.float64)
+        self.text = mm[n_float * 8 :]
         self.qpos = self.floats[1 : 1 + nq]
         self.sliders = self.floats[1 + nq :]
+
+    def set_text(self, left: str, right: str) -> None:
+        raw = (left.encode() + b"\0" + right.encode())[:TEXT_BYTES]
+        self.text[: len(raw)] = np.frombuffer(raw, dtype=np.uint8)
+        self.text[len(raw) :] = 0
+
+    def get_text(self) -> tuple[str, str]:
+        left, _, right = bytes(self.text).rstrip(b"\0").partition(b"\0")
+        return left.decode(errors="replace"), right.decode(errors="replace")
 
 
 class ViewerLink:
@@ -57,10 +73,13 @@ class ViewerLink:
     def sliders(self) -> np.ndarray:
         return self._state.sliders
 
-    def sync(self, qpos: np.ndarray) -> None:
+    def sync(self, qpos: np.ndarray, left: str | None = None, right: str = "") -> None:
+        """Publish the pose; left/right (two text columns) update the overlay along the top when given."""
         self._beat += 1.0
         self._state.qpos[:] = qpos
         self._state.floats[0] = self._beat
+        if left is not None:
+            self._state.set_text(left, right)
 
     def close(self) -> None:
         if self._proc.poll() is None:
@@ -98,6 +117,7 @@ def _viewer_main(model_path, state_path, nq, n_robot, n_sliders, parent_pid) -> 
         with viewer.lock():
             # Hide the robot motors so the Control panel shows only the shot sliders.
             viewer.opt.actuatorgroup[ROBOT_ACTUATOR_GROUP] = 0
+        last_text = None
         next_t = time.monotonic()
         # Leave when the window closes or the sim is gone (the sim's pid stops being our parent).
         while viewer.is_running() and os.getppid() == parent_pid:
@@ -106,6 +126,10 @@ def _viewer_main(model_path, state_path, nq, n_robot, n_sliders, parent_pid) -> 
                 mujoco.mj_forward(model, data)
                 state.sliders[:] = data.ctrl[n_robot:]
                 viewer.cam.lookat[:] = data.qpos[0:3]
+            text = state.get_text()
+            if text != last_text:
+                last_text = text
+                viewer.set_texts((None, mujoco.mjtGridPos.mjGRID_TOPLEFT, *text))
             viewer.sync()
             next_t += period
             delay = next_t - time.monotonic()

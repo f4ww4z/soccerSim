@@ -5,6 +5,8 @@ import sys
 import threading
 import time
 
+import mujoco
+import numpy as np
 import rclpy
 from booster_interface.msg import LowState, Odometer, RemoteControllerState
 from booster_msgs.msg import RpcReqMsg, RpcRespMsg
@@ -31,6 +33,7 @@ from .viewer_link import ViewerLink
 from .web import ControlServer
 
 REFEREE_KEYS = {"state", "set_play", "kicking", "stopped"}
+MODE_NAMES = {0: "damping", 1: "prepare", 2: "walking", 3: "custom", 4: "soccer"}
 
 
 class SimBridge(Node):
@@ -82,10 +85,16 @@ class SimBridge(Node):
         self._fire_panel = False
         self._reset_robot = False
         self._status: dict = {}
+        self._decision = "-"  # brain's current decision ("retreat", "save", ...)
+        self._decision_topic = False  # True once /brain/decision (patches/brain-decision-topic.patch) has published
+        self._event = ""  # last longer announcement brain made ("game state PLAYING", ...)
+        self._rate_t, self._rate_ticks, self.tick_hz = time.monotonic(), 0, 0.0
 
         self.create_subscription(RpcReqMsg, "LocoApiTopicReq", self.on_rpc, 10)
         self.create_subscription(Kick, "/kick_ball", self.on_kick_ball, 10)
         self.create_subscription(Float64MultiArray, "/sim/shoot", self.on_sim_shoot, 10)
+        self.create_subscription(String, "/speak", self.on_speak, 10)
+        self.create_subscription(String, "/brain/decision", self.on_decision, 10)
         self.resp_pub = self.create_publisher(RpcRespMsg, "LocoApiTopicResp", 10)
         self.odom_pub = self.create_publisher(Odometer, "/odometer_state", 10)
         self.low_pub = self.create_publisher(LowState, "/low_state", 10)
@@ -129,6 +138,20 @@ class SimBridge(Node):
         ref = msg_conv.kick_ref(msg, time.monotonic())
         with self.lock:
             self.kick_ref = ref
+
+    def on_speak(self, msg: String) -> None:
+        # Brain's espeak announcements: sentences are events. Single words are decisions, but /speak is
+        # rate-limited, so they only count when the patched brain's /brain/decision isn't there.
+        with self.lock:
+            if " " in msg.data.strip():
+                self._event = msg.data
+            elif not self._decision_topic:
+                self._decision = msg.data
+
+    def on_decision(self, msg: String) -> None:
+        with self.lock:
+            self._decision_topic = True
+            self._decision = msg.data or "-"
 
     def on_sim_shoot(self, msg: Float64MultiArray) -> None:
         if len(msg.data) != len(SHOT_FIELDS):
@@ -239,6 +262,42 @@ class SimBridge(Node):
             }
         self.tick_count += 1
 
+    def overlay(self) -> tuple[str, str]:
+        """Two text columns for the top of the viewer: labels, values."""
+        with self.lock:
+            st = dict(self._status)
+            decision, event = self._decision, self._event
+            mode, kicking = self.loco.mode, self.loco.kicking()
+            vx, vy, vyaw = self.loco.effective_velocity()
+        speed = float(np.linalg.norm(self.sim.ball_velocity()))
+        shots = st.get("shots", {})
+        left = ["brain decision", "walk command", "ball speed", "robot mode", "referee", "brain said", "shots", "sim rate"]
+        right = [
+            decision,
+            f"vx {vx:+.2f}  vy {vy:+.2f}  yaw {vyaw:+.2f}" + ("   [manual]" if st.get("manual_drive") else ""),
+            f"{speed:.1f} m/s",
+            MODE_NAMES.get(mode, str(mode)) + ("  (kicking)" if kicking else ""),
+            f"{st.get('state', '-')}  set play {st.get('set_play', '-')}  kick: {st.get('kicking', '-')}",
+            event or "-",
+            f"goal {shots.get('goal', 0)}  /  no goal {shots.get('no_goal', 0)}"
+            + (f"   last: {st['last_shot']}" if st.get("last_shot") else ""),
+            f"{self.tick_hz:.0f} Hz" + ("" if self.tick_hz >= 45 else "  (target 50, running slow)"),
+        ]
+        return "\n".join(left), "\n".join(right)
+
+    def note_tick(self) -> None:
+        """Measure the achieved tick rate; warn when the sim can't keep up (brain then sees a slowed world)."""
+        self._rate_ticks += 1
+        now = time.monotonic()
+        if now - self._rate_t >= 1.0:
+            self.tick_hz = self._rate_ticks / (now - self._rate_t)
+            self._rate_t, self._rate_ticks = now, 0
+            if self.tick_hz < 45 and self.tick_count > 250:  # not while the first frames warm up
+                self.get_logger().warning(
+                    f"sim ticking at {self.tick_hz:.0f} Hz (target 50): brain sees a slowed-down world",
+                    throttle_duration_sec=15.0,
+                )
+
     # ---- timers ----
     def publish_referee(self) -> None:
         with self.lock:
@@ -265,15 +324,21 @@ def _run_realtime(node: SimBridge, viewer, link: ViewerLink | None = None) -> No
     period = node.sim.cfg.policy_dt
     next_t = time.monotonic()
     n_robot = node.sim.n_robot_ctrl
+    frame = 0
     while rclpy.ok() and (viewer is None or viewer.is_running()) and (link is None or link.is_running()):
         if link is not None:
             node.sim.mj_data.ctrl[n_robot:] = link.sliders()  # the shot sliders live in the viewer process
         node.tick()
+        node.note_tick()
+        frame += 1
+        text = node.overlay() if (viewer or link) and frame % 5 == 0 else None  # 10 Hz is plenty for text
         if viewer is not None:
             viewer.cam.lookat[:] = node.sim.mj_data.qpos[0:3]
+            if text is not None:
+                viewer.set_texts((None, mujoco.mjtGridPos.mjGRID_TOPLEFT, *text))
             viewer.sync()
         if link is not None:
-            link.sync(node.sim.mj_data.qpos)
+            link.sync(node.sim.mj_data.qpos, *(text or (None,)))
         next_t += period
         delay = next_t - time.monotonic()
         if delay > 0:

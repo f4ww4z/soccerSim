@@ -55,9 +55,14 @@ power, or anything that depends on the vision model's exact numbers.
 ```
 
 The sim never modifies the Robotedge repo. `pixi run build-sim` copies `src/brain` into this repo,
-applies `patches/brain-clang.patch` and builds it. The patch is 8 lines that clang needs and
-the robot's GCC doesn't; behaviour is unchanged. Brain runs with the Robotedge `config.yaml`, but
-with rerun logging and team UDP turned off.
+applies two small patches and builds it:
+
+- `patches/brain-clang.patch`: 8 lines that clang needs and the robot's GCC doesn't. Behaviour is unchanged.
+- `patches/brain-decision-topic.patch`: an observer-only publisher, `/brain/decision`, so the viewer
+  overlay can show every decision change. Optional: if it stops applying the build warns and the
+  overlay falls back to brain's rate-limited `/speak` announcements.
+
+Brain runs with the Robotedge `config.yaml`, but with rerun logging and team UDP turned off.
 
 ## Requirements
 
@@ -112,6 +117,19 @@ pixi run striker          # striker (player 2), skips the match procedure
 These are shortcuts for `pixi run bash scripts/run_sim.sh --viewer [--quick] role:=...`.
 Then open the controller tab at **http://127.0.0.1:8765/**. Leave out `--viewer` to run without the
 MuJoCo window.
+
+The text along the top of the viewer is brain's live state:
+
+| Row | Shows |
+|---|---|
+| brain decision | `find`, `retreat`, `save`, `chase`, ... as brain's behaviour tree decides it |
+| walk command | the velocity brain asks the robot for (`vx`, `vy`, `yaw`), `[manual]` while the gamepad drives |
+| ball speed | in m/s |
+| robot mode | `soccer`, `prepare`, ... and `(kicking)` during a visual kick |
+| referee | game state, set play and who kicks |
+| brain said | brain's last spoken announcement (`game state PLAYING`, `camera lost`, ...) |
+| shots | goal / no-goal tally and the last result |
+| sim rate | achieved tick rate against the 50 Hz target |
 
 - **By default the sim follows the real match procedure.** The robot boots in prepare mode at the
   sideline. In the controller tab, press **Stand up (LT+Up)**, **Recalibrate (LT+A)**, then
@@ -194,6 +212,8 @@ pixi run test-ros    # bridge tests: needs build-sim, and no other sim on the sa
   50 Hz makes the ball look slower to brain than the shot you fired. On Linux/WSL2 it holds 50 Hz with
   the viewer open. On a Mac the viewer shares the sim's process and can slow it to about half speed;
   run without `--viewer` when timing matters.
+- If the sim logs `sim ticking at N Hz (target 50)`, something else is using the CPU. The overlay's
+  sim rate shows the same number.
 - On Linux, mouse-dragging the robot or ball in the viewer (MuJoCo's perturb) does nothing: the viewer
   only replays the sim's state. Use the shot sliders or the controller tab.
 - The kick is an approximation (`soccer_sim/kick_model.py`), not Booster's policy.
