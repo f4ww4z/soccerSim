@@ -8,6 +8,7 @@ State file layout (float64 header, then utf-8 text):
     [0]               sim heartbeat (counts up on every write)
     [1 : 1 + nq]      qpos, sim -> viewer
     [1 + nq : ...]    slider values (ctrl[n_robot:]), viewer -> sim
+    [... : +6*nbody]  xfrc_applied, viewer -> sim: the mouse-drag force (Ctrl+right-drag) the viewer computes
     [... : +TEXT]     overlay: two utf-8 columns joined by a NUL byte, NUL padded; sim -> viewer
 """
 
@@ -23,8 +24,8 @@ TEXT_BYTES = 2048
 
 
 class _State:
-    def __init__(self, path: str, nq: int, n_sliders: int, create: bool):
-        n_float = 1 + nq + n_sliders
+    def __init__(self, path: str, nq: int, n_sliders: int, nbody: int, create: bool):
+        n_float = 1 + nq + n_sliders + 6 * nbody
         size = n_float * 8 + TEXT_BYTES
         if create:
             with open(path, "wb") as f:
@@ -34,7 +35,8 @@ class _State:
         self.floats = mm[: n_float * 8].view(np.float64)
         self.text = mm[n_float * 8 :]
         self.qpos = self.floats[1 : 1 + nq]
-        self.sliders = self.floats[1 + nq :]
+        self.sliders = self.floats[1 + nq : 1 + nq + n_sliders]
+        self.xfrc = self.floats[1 + nq + n_sliders :].reshape(nbody, 6)
 
     def set_text(self, left: str, right: str) -> None:
         raw = (left.encode() + b"\0" + right.encode())[:TEXT_BYTES]
@@ -58,7 +60,7 @@ class ViewerLink:
         state_path = os.path.join(self._dir, "state.bin")
         mujoco.mj_saveModel(model, model_path)
         n_sliders = model.nu - n_robot_ctrl
-        self._state = _State(state_path, model.nq, n_sliders, create=True)
+        self._state = _State(state_path, model.nq, n_sliders, model.nbody, create=True)
         self._state.sliders[:] = sliders
         self._proc = subprocess.Popen(
             [sys.executable, "-m", "soccer_sim_bridge.viewer_link", model_path, state_path,
@@ -72,6 +74,10 @@ class ViewerLink:
 
     def sliders(self) -> np.ndarray:
         return self._state.sliders
+
+    def xfrc(self) -> np.ndarray:
+        """Mouse-drag forces from the viewer, one row (force, torque) per body."""
+        return self._state.xfrc
 
     def sync(self, qpos: np.ndarray, left: str | None = None, right: str = "") -> None:
         """Publish the pose; left/right (two text columns) update the overlay along the top when given."""
@@ -107,7 +113,7 @@ def _viewer_main(model_path, state_path, nq, n_robot, n_sliders, parent_pid) -> 
 
     model = mujoco.MjModel.from_binary_path(model_path)
     data = mujoco.MjData(model)
-    state = _State(state_path, nq, n_sliders, create=False)
+    state = _State(state_path, nq, n_sliders, model.nbody, create=False)
     data.qpos[:] = state.qpos
     data.ctrl[n_robot:] = state.sliders
     mujoco.mj_forward(model, data)
@@ -125,6 +131,7 @@ def _viewer_main(model_path, state_path, nq, n_robot, n_sliders, parent_pid) -> 
                 data.qpos[:] = state.qpos
                 mujoco.mj_forward(model, data)
                 state.sliders[:] = data.ctrl[n_robot:]
+                state.xfrc[:] = data.xfrc_applied  # written by viewer.sync() from a Ctrl+right-drag
                 viewer.cam.lookat[:] = data.qpos[0:3]
             text = state.get_text()
             if text != last_text:

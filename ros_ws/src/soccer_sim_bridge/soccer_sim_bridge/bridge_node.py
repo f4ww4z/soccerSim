@@ -328,6 +328,7 @@ def _run_realtime(node: SimBridge, viewer, link: ViewerLink | None = None) -> No
     while rclpy.ok() and (viewer is None or viewer.is_running()) and (link is None or link.is_running()):
         if link is not None:
             node.sim.mj_data.ctrl[n_robot:] = link.sliders()  # the shot sliders live in the viewer process
+            node.sim.mj_data.xfrc_applied[:] = link.xfrc()  # so does the mouse drag (Ctrl+right-drag)
         node.tick()
         node.note_tick()
         frame += 1

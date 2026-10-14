@@ -214,8 +214,9 @@ pixi run test-ros    # bridge tests: needs build-sim, and no other sim on the sa
   run without `--viewer` when timing matters.
 - If the sim logs `sim ticking at N Hz (target 50)`, something else is using the CPU. The overlay's
   sim rate shows the same number.
-- On Linux, mouse-dragging the robot or ball in the viewer (MuJoCo's perturb) does nothing: the viewer
-  only replays the sim's state. Use the shot sliders or the controller tab.
+- On Linux the viewer is a separate process that replays the sim's state. The shot sliders and
+  Ctrl+right-drag on the robot or ball are passed back to the sim, but the viewer's Backspace reset and
+  the physics options in its right panel only change the viewer's own copy.
 - The kick is an approximation (`soccer_sim/kick_model.py`), not Booster's policy.
 - The ball is detected by Booster's public sim-trained YOLOv8, not the team's own model, which only
   runs on the Jetson with TensorRT.
