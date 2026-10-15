@@ -24,6 +24,7 @@ from soccer_sim.field import ROBOT_ACTUATOR_GROUP
 from soccer_sim.joystick import FirmwareRemote, manual_velocity
 from soccer_sim.kick_model import KickRef
 from soccer_sim.loco_rpc import MODE_DAMPING, MODE_PREPARE, MODE_SOCCER, LocoState, handle_request
+from soccer_sim.placement import robot_pose_from_dict
 from soccer_sim.referee import SET_PLAYS, STATES, Referee, name_of, parse_schedule
 from soccer_sim.shots import SHOT_FIELDS, Shot, ShotPanel, ShotTracker, shot_from_dict
 from soccer_sim.sim import SoccerController
@@ -83,7 +84,7 @@ class SimBridge(Node):
         self._joy: tuple[RemoteControllerState, float] | None = None
         self._pending_shots: list[Shot] = []
         self._fire_panel = False
-        self._reset_robot = False
+        self._reset_robot: tuple[float, float, float] | None = None
         self._status: dict = {}
         self._decision = "-"  # brain's current decision ("retreat", "save", ...)
         self._decision_topic = False  # True once /brain/decision (patches/brain-decision-topic.patch) has published
@@ -185,9 +186,10 @@ class SimBridge(Node):
             else:
                 self._pending_shots.append(shot)
 
-    def on_web_reset_robot(self, _payload: dict) -> None:
+    def on_web_reset_robot(self, payload: dict) -> None:
+        pose = robot_pose_from_dict(payload, self.sim.sim_cfg.field)  # {} = keeper's home
         with self.lock:
-            self._reset_robot = True
+            self._reset_robot = pose
 
     def status(self) -> dict:
         with self.lock:
@@ -208,10 +210,10 @@ class SimBridge(Node):
             self.sim.apply(self.loco, now, self.kick_ref, manual)
             shots, self._pending_shots = self._pending_shots, []
             fire_panel, self._fire_panel = self._fire_panel, False
-            reset_robot, self._reset_robot = self._reset_robot, False
+            reset_robot, self._reset_robot = self._reset_robot, None
 
-        if reset_robot:  # keeper's home: goal centre, 1 m in front of the line, facing the field
-            self.sim.reset_robot(-10.0, 0.0, 0.0)
+        if reset_robot is not None:
+            self.sim.reset_robot(*reset_robot)
 
         panel = self.sim.shot_panel_values()
         panel_shot = self.shot_panel.read(panel)
@@ -246,6 +248,7 @@ class SimBridge(Node):
             self.det_pub.publish(msg_conv.detections(stamp, dets))
             self.line_pub.publish(msg_conv.line_segments(stamp, lines))
 
+        pose, ball = self.sim.robot_pose(), self.sim.ball_position()
         with self.lock:
             ref = self.referee.snapshot(now)
             self._status = {
@@ -259,6 +262,10 @@ class SimBridge(Node):
                 "manual_drive": manual is not None,
                 "shots": dict(self.shot_tracker.tally),
                 "last_shot": self.last_shot,
+                "robot": {"x": pose.x, "y": pose.y, "yaw": pose.yaw},
+                "ball": {"x": float(ball[0]), "y": float(ball[1])},
+                "decision": self._decision,
+                "hz": round(self.tick_hz, 1),
             }
         self.tick_count += 1
 

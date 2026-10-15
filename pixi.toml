@@ -45,6 +45,7 @@ build-sim = { cmd = "bash scripts/setup_ws.sh", env = { PACKAGES = "brain soccer
 test-ros = "bash -c 'source ros_ws/install/setup.bash && pytest -m \"ros and not slow\" ros_ws/src/soccer_sim_bridge/test -p no:cacheprovider'"
 test = "pytest -m 'not slow and not ros'"
 test-slow = "pytest -m slow"
+launch = "python -m soccer_launcher"
 keeper = "bash scripts/run_sim.sh --viewer role:=goal_keeper"
 keeper-quick = "bash scripts/run_sim.sh --viewer --quick role:=goal_keeper"
 striker = "bash scripts/run_sim.sh --viewer --quick role:=striker player_id:=2"
