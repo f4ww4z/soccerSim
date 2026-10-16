@@ -38,42 +38,160 @@ async function api(path, body) {
 /* ------------------------------------------------------------------ state */
 const DEFAULTS = {role: "goal_keeper", player_id: 1, tree: "game.xml", match_mode: "quick", viewer: true, ball_detector: "yolo",
   spawn_x: null, spawn_y: null, spawn_yaw: null, ball_x: null, ball_y: null, referee_schedule: "", rcap_root: "",
-  sim_vy_max: null, camera_gl: "auto", mujoco_gl: "", ros_domain_id: null, extra_bridge_args: "", extra_launch_args: ""};
+  sim_vy_max: null, camera_gl: "auto", mujoco_gl: "", ros_domain_id: null, extra_bridge_args: "", extra_launch_args: "",
+  players: [], half_minutes: 10, continuous: false, detailed_bodies: false, graphics: "gpu"};
 const S = {
   cfg: {...DEFAULTS}, parseErrors: {}, srv: null, static: null, check: null, checkSeq: 0, checkTimer: null,
-  ready: false, status: {}, lastShot: "", cur: "", autoSwitched: false, lastState: "idle",
+  ready: false, status: {}, lastShot: "", cur: "", autoSwitched: false, lastState: "idle", sel: 0, lastRoster: null,
 };
 const ACTIVE = new Set(["building", "starting", "running", "tool", "stopping"]);
 const controls = {};
 
 /* ------------------------------------------------------------ form schema */
+const isMatch = c => (c.players || []).length > 0;
+const robotCount = c => (c.players || []).length;
 const FIELDS = [
-  {group: "Role & match", items: [
-    {k: "role", label: "Role", type: "select", opts: ["goal_keeper", "striker", "defender"], help: "Player 1 is always the keeper; use player 2-5 for a striker or defender."},
+  {group: "What to simulate", items: [
+    {k: "_mode", label: "Mode", type: "mode", help: c => isMatch(c)
+      ? "A match: several robots, each running its own brain, with a referee, score and clock."
+      : "One robot alone on the pitch; shots come from the Control tab."},
+  ]},
+  {group: "Players", show: isMatch, items: [{k: "players", type: "roster", wide: true}]},
+  {group: "Robot", show: c => !isMatch(c), items: [
+    {k: "role", label: "Role", type: "select", opts: ["goal_keeper", "striker", "defender"], help: () => "Player 1 is always the keeper; use player 2-5 for a striker or defender."},
     {k: "player_id", label: "Player id", type: "select", opts: [1, 2, 3, 4, 5], num: true},
+  ]},
+  {group: "Match", items: [
     {k: "tree", label: "Behaviour tree", type: "select", opts: ["game.xml", "chase.xml", "demo.xml"]},
-    {k: "match_mode", label: "Match", type: "seg", opts: [["quick", "Quick"], ["full", "Full procedure"]], help: "Quick: robot already standing, scripted referee INITIAL→READY→SET→PLAYING. Full: you stand it up and run the referee from the Control tab."},
-    {k: "viewer", label: "MuJoCo viewer window", type: "switch", help: "Needs a display (WSLg works)."},
+    {k: "match_mode", label: "Start", type: "seg", opts: [["quick", "Quick"], ["full", "Full procedure"]], help: c => isMatch(c)
+      ? "Quick: robots wait on the sideline and the referee runs INITIAL→READY→SET→PLAYING by itself. Full: robots stand up and calibrate on their own, then you press READY in the Control tab."
+      : "Quick: robot already standing, scripted referee INITIAL→READY→SET→PLAYING. Full: you stand it up and run the referee from the Control tab."},
+    {k: "_length", label: "Length", type: "length", show: isMatch, help: c => c.continuous
+      ? "No halves and no clock limit: play on until you press Finish."
+      : `Two halves of ${c.half_minutes} min with a side swap at half-time (real rules: 10).`},
+    {k: "viewer", label: "MuJoCo viewer window", type: "switch", help: () => "Needs a display (WSLg works)."},
+    {k: "graphics", label: "Viewer graphics", type: "seg", opts: [["gpu", "GPU"], ["cpu", "CPU"]], show: c => c.viewer, help: c => c.graphics === "cpu"
+      ? "Software rendering on the CPU (Mesa llvmpipe). Slow with many robots; only for when the GPU driver misbehaves. macOS ignores this."
+      : "The viewer window is drawn by your graphics card (the default). macOS always uses the system's graphics."},
+    {k: "detailed_bodies", label: "Detailed robot bodies", type: "switch", show: c => isMatch(c) && c.viewer, help: c => c.detailed_bodies
+      ? `Real T2 meshes, about 1 million triangles each${robotCount(c) > 2 ? `: ${robotCount(c)} robots will make the viewer lag` : ""}. Light parts are tinted by team.`
+      : "Off: simple bodies, home blue and away orange, no shadows. Keeps the viewer smooth with many robots."},
   ]},
   {group: "Perception", items: [
-    {k: "ball_detector", label: "Ball detector", type: "seg", opts: [["yolo", "YOLO"], ["ground_truth", "Ground truth"]], help: "Ground truth gives the brain a perfect ball: debug behaviour, not vision."},
+    {k: "ball_detector", label: "Ball detector", type: "seg", opts: [["yolo", "YOLO"], ["ground_truth", "Ground truth"]], help: c =>
+      c.ball_detector === "yolo" && robotCount(c) > 1
+        ? `▲ YOLO shares about ${robotCount(c) <= 5 ? 25 : 12.5} camera frames a second between all robots (${((robotCount(c) <= 5 ? 25 : 12.5) / robotCount(c)).toFixed(1)} each). Ground truth gives every robot full-rate perception.`
+        : "Ground truth gives the brain a perfect ball: debug behaviour, not vision."},
   ]},
   {group: "Field & referee (blank = default)", items: [
-    {k: ["spawn_x", "spawn_y"], label: "Robot spawn x / y (m)", type: "pair", ph: ["-6.0", "-7.5"]},
-    {k: "spawn_yaw", label: "Robot spawn yaw (rad)", type: "num", ph: "1.571"},
-    {k: ["ball_x", "ball_y"], label: "Ball x / y (m)", type: "pair", ph: ["-6.0", "-4.0"]},
-    {k: "referee_schedule", label: "Referee schedule", type: "text", ph: "0:3,1:20,2:3,3:0", help: "state:seconds pairs, the last is held. 0 INITIAL · 1 READY · 2 SET · 3 PLAYING · 4 FINISHED."},
+    {k: ["spawn_x", "spawn_y"], label: "Robot spawn x / y (m)", type: "pair", ph: ["-6.0", "-7.5"], show: c => !isMatch(c)},
+    {k: "spawn_yaw", label: "Robot spawn yaw (rad)", type: "num", ph: "1.571", show: c => !isMatch(c)},
+    {k: ["ball_x", "ball_y"], label: "Ball x / y (m)", type: "pair", ph: ["-6.0", "-4.0"], phMatch: ["0.0", "0.0"]},
+    {k: "referee_schedule", label: "Referee schedule", type: "text", ph: "0:3,1:20,2:3,3:0", show: c => !isMatch(c), help: () => "state:seconds pairs, the last is held. 0 INITIAL · 1 READY · 2 SET · 3 PLAYING · 4 FINISHED."},
   ]},
   {group: "Advanced", items: [
-    {k: "rcap_root", label: "rcap clone", type: "text", ph: "auto-detect", help: "Blank: $ROBOTEDGE_ROOT, the sibling Robotedge-5v5-RCAP2026, or ~/Robotedge-5v5-RCAP2026."},
+    {k: "rcap_root", label: "rcap clone", type: "text", ph: "auto-detect", help: () => "Blank: $ROBOTEDGE_ROOT, the sibling Robotedge-5v5-RCAP2026, or ~/Robotedge-5v5-RCAP2026."},
     {k: "sim_vy_max", label: "SIM_VY_MAX (m/s)", type: "num", ph: "0.8"},
     {k: "camera_gl", label: "Camera GL", type: "select", opts: ["auto", "software", "gpu"]},
     {k: "mujoco_gl", label: "MUJOCO_GL", type: "select", opts: ["", "egl", "glfw", "osmesa"], labels: {"": "(default)"}},
-    {k: "ros_domain_id", label: "ROS_DOMAIN_ID", type: "num", int: true, ph: "default", help: "Give each simultaneous sim its own domain: topics are global."},
+    {k: "ros_domain_id", label: "ROS_DOMAIN_ID", type: "num", int: true, ph: "default", help: c => isMatch(c)
+      ? "Each robot gets its own ROS domain, counting up from this one (default 70)."
+      : "Give each simultaneous sim its own domain: topics are global."},
     {k: "extra_bridge_args", label: "Extra bridge args", type: "text", ph: "-p team_id:=131"},
     {k: "extra_launch_args", label: "Extra launch args", type: "text", ph: "key:=value"},
   ]},
 ];
+const uiRefs = [];   // {group el, items: [{el, f, help el}]}: visibility and help text follow the config
+
+/* ---- roster editor: five fixed slots per team, so an invalid lineup cannot be built ---- */
+const ENTRY = {1: [-9.0, "right"], 2: [-6.0, "left"], 3: [-6.0, "right"], 4: [-3.5, "left"], 5: [-3.5, "right"]};
+const DEFAULT_ROLE = {1: "goal_keeper", 2: "striker", 3: "striker", 4: "defender", 5: "defender"};
+const ROLE_LABEL = {goal_keeper: "Goalkeeper", striker: "Striker", defender: "Defender"};
+const TEAM_LABEL = {home: "Home", away: "Away"};
+const defaultRoster = () => [{team: "home", player_id: 1, role: "goal_keeper"}, {team: "home", player_id: 2, role: "striker"}, {team: "away", player_id: 2, role: "striker"}];
+function setPlayers(list) {
+  S.cfg.players = list;
+  controls.players.set(list);
+  S.cur = ""; syncDerived(); renderSidebar(); saveDraft(); scheduleCheck();
+}
+function setMode(match) {
+  if (match === isMatch(S.cfg)) return;
+  if (match) {
+    S.cfg.players = S.lastRoster && S.lastRoster.length ? S.lastRoster : defaultRoster();
+    if (S.cfg.ball_detector === "yolo") S.cfg.ball_detector = "ground_truth";  // many cameras + YOLO cannot keep up
+    controls.ball_detector.set(S.cfg.ball_detector);
+  } else {
+    S.lastRoster = S.cfg.players;
+    S.cfg.players = [];
+  }
+  controls.players.set(S.cfg.players);
+  S.cur = ""; syncDerived(); renderSidebar(); saveDraft(); scheduleCheck();
+}
+function buildRoster() {
+  const root = h("div", {class: "roster", id: "roster-card"});
+  const render = () => {
+    const players = S.cfg.players || [];
+    const cols = ["home", "away"].map(team => {
+      const mine = Object.fromEntries(players.filter(p => p.team === team).map(p => [p.player_id, p]));
+      const others = players.filter(p => p.team !== team);
+      const count = Object.keys(mine).length;
+      const slots = [1, 2, 3, 4, 5].map(id => {
+        const p = mine[id];
+        if (!p) {
+          return h("button", {class: "slot empty", type: "button", "aria-label": `Add ${TEAM_LABEL[team]} player ${id}`,
+            onclick: () => setPlayers([...players, {team, player_id: id, role: DEFAULT_ROLE[id]}])},
+            h("span", {class: "num", text: id}), h("span", {text: id === 1 ? "add goalkeeper" : "add player"}));
+        }
+        const role = id === 1
+          ? h("span", {class: "role-fixed", text: "Goalkeeper"})
+          : h("select", {"aria-label": `${TEAM_LABEL[team]} player ${id} role`, onchange: e => setPlayers(players.map(q => q === p ? {...q, role: e.target.value} : q))},
+              ["striker", "defender"].map(r => h("option", {value: r, text: ROLE_LABEL[r], selected: p.role === r ? true : null})));
+        return h("div", {class: "slot filled"}, h("span", {class: "num", text: id}), role,
+          h("button", {class: "x", type: "button", title: "Remove this player", "aria-label": `Remove ${TEAM_LABEL[team]} player ${id}`, onclick: () => setPlayers(players.filter(q => q !== p)), text: "×"}));
+      });
+      return h("div", {class: `team ${team}`},
+        h("div", {class: "team-head"}, h("strong", {text: `${TEAM_LABEL[team]} · ${count}`}),
+          h("span", {class: "spacer"}),
+          h("button", {class: "btn small", type: "button", disabled: count === 5 ? "true" : null, text: "Fill 5",
+            onclick: () => setPlayers([...others, ...[1, 2, 3, 4, 5].map(id => mine[id] || {team, player_id: id, role: DEFAULT_ROLE[id]})])}),
+          h("button", {class: "btn small", type: "button", disabled: count === 0 ? "true" : null, text: "Clear", onclick: () => setPlayers(others)})),
+        slots);
+    });
+    const home = players.filter(p => p.team === "home").length, away = players.length - home;
+    const err = !home ? "Add at least one home player." : "";
+    root.replaceChildren(
+      h("div", {class: "teams"}, cols),
+      h("div", {class: "roster-foot"},
+        h("span", {class: "tag info", text: `${players.length} robot${players.length === 1 ? "" : "s"}`}),
+        h("span", {class: "hint", text: `${home} home · ${away} away. Player 1 is always the goalkeeper; add anyone else as a striker or defender.`}),
+        err ? h("span", {class: "tag bad", text: err}) : null),
+      miniPitch(players));
+  };
+  controls.players = {set: render};
+  return root;
+}
+/* start spots seen from above: home on the left half, away mirrored on the right */
+function miniPitch(players) {
+  const svg = svgEl("svg", {viewBox: "-12.2 -8.3 24.4 16.6", class: "mini", role: "img", "aria-label": "Where each robot starts"});
+  const g = svgEl("g", {transform: "scale(1,-1)"});
+  g.append(svgEl("rect", {class: "line", x: -11, y: -7.06, width: 22, height: 14.12}), svgEl("path", {class: "line", d: "M0 -7.06V7.06"}), svgEl("circle", {class: "line", cx: 0, cy: 0, r: 1.99}));
+  for (const p of players) {
+    const e = ENTRY[p.player_id];
+    if (!e) continue;
+    const sgn = p.team === "home" ? 1 : -1;
+    const x = e[0] * sgn, y = (e[1] === "right" ? -7.5 : 7.5) * sgn;
+    g.append(svgEl("circle", {class: `dot ${p.team}`, cx: x, cy: y, r: .62}));
+    g.append(svgEl("text", {x, y: -y, "text-anchor": "middle", "dominant-baseline": "central", transform: "scale(1,-1)"}, String(p.player_id)));
+  }
+  svg.append(g);
+  return svg;
+}
+function focusRoster() {
+  const el = $("#roster-card");
+  if (!el) return;
+  el.scrollIntoView({block: "center", behavior: "smooth"});
+  el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
+}
 
 function numInput(key, ph, isInt) {
   const el = h("input", {id: "f-" + key, type: "text", inputmode: isInt ? "numeric" : "decimal", placeholder: ph || "", "aria-label": key, autocomplete: "off"});
@@ -95,8 +213,10 @@ function numInput(key, ph, isInt) {
 function buildForm() {
   const form = $("#form");
   form.replaceChildren();
+  uiRefs.length = 0;
   for (const g of FIELDS) {
     const fs = h("fieldset", {}, h("legend", {text: g.group}));
+    const ref = {g, el: fs, items: []};
     for (const f of g.items) {
       const id = "f-" + (Array.isArray(f.k) ? f.k[0] : f.k);
       let input;
@@ -116,8 +236,23 @@ function buildForm() {
         cb.addEventListener("change", sync);
         input = h("label", {class: "switch"}, cb, h("span", {class: "track"}), word);
         controls[f.k] = {set: v => { cb.checked = !!v; sync(); }};
+      } else if (f.type === "mode") {
+        input = h("div", {class: "seg", role: "radiogroup", "aria-label": "Mode"}, [["single", "Single robot"], ["match", "Match"]].map(([v, t]) =>
+          h("label", {}, h("input", {type: "radio", name: "f-mode", value: v, onchange: () => setMode(v === "match")}), h("span", {text: t}))));
+        controls._mode = {set: () => $$("input", input).forEach(r => { r.checked = (r.value === "match") === isMatch(S.cfg); })};
+      } else if (f.type === "roster") {
+        input = buildRoster();
+      } else if (f.type === "length") {
+        const seg = h("div", {class: "seg", role: "radiogroup", "aria-label": "Match length"}, [["halves", "Two halves"], ["continuous", "Continuous"]].map(([v, t]) =>
+          h("label", {}, h("input", {type: "radio", name: "f-length", value: v, onchange: () => setCfg("continuous", v === "continuous")}), h("span", {text: t}))));
+        const mins = numInput("half_minutes", "10", false);
+        mins.classList.add("mins");
+        const minsBox = h("span", {class: "mins-box"}, mins, h("span", {class: "hint", text: "min per half"}));
+        input = h("div", {class: "length"}, seg, minsBox);
+        controls.continuous = {set: v => { $$("input", seg).forEach(r => { r.checked = (r.value === "continuous") === !!v; }); minsBox.hidden = !!v; }};
       } else if (f.type === "pair") {
         input = h("div", {class: "pair"}, f.k.map((k, i) => numInput(k, f.ph[i], false)));
+        f.phEls = $$("input", input);
       } else if (f.type === "num") {
         input = numInput(f.k, f.ph, !!f.int);
       } else {
@@ -126,10 +261,31 @@ function buildForm() {
         controls[f.k] = {set: v => { el.value = v ?? ""; }};
         input = el;
       }
-      fs.append(h("div", {class: "field"}, h("label", {for: id, text: f.label}), input, f.help ? h("div", {class: "help", text: f.help}) : null));
+      const help = h("div", {class: "help"});
+      const wrap = h("div", {class: "field" + (f.wide ? " wide" : "")}, f.label ? h("label", {for: id, text: f.label}) : null, input, help);
+      fs.append(wrap);
+      ref.items.push({f, el: wrap, help});
     }
+    uiRefs.push(ref);
     form.append(fs);
   }
+}
+/* show only what applies to the current mode, and keep help texts and placeholders in step with the config */
+function syncDerived() {
+  for (const ref of uiRefs) {
+    let any = false;
+    for (const it of ref.items) {
+      const on = !it.f.show || it.f.show(S.cfg);
+      it.el.hidden = !on;
+      any = any || on;
+      const text = typeof it.f.help === "function" ? it.f.help(S.cfg) : (it.f.help || "");
+      it.help.textContent = text;
+      it.help.hidden = !text;
+      if (it.f.phEls) it.f.phEls.forEach((el, i) => { el.placeholder = (isMatch(S.cfg) && it.f.phMatch ? it.f.phMatch : it.f.ph)[i]; });
+    }
+    ref.el.hidden = ref.g.show ? !ref.g.show(S.cfg) : !any;
+  }
+  controls._mode && controls._mode.set();
 }
 
 function setCfg(key, value, quiet) {
@@ -141,13 +297,13 @@ function setCfg(key, value, quiet) {
     if (value === 1) S.cfg.role = "goal_keeper"; else if (S.cfg.role === "goal_keeper") S.cfg.role = "striker";
     controls.role.set(S.cfg.role);
   }
-  if (!quiet) { S.cur = ""; renderSidebar(); saveDraft(); scheduleCheck(); }
+  if (!quiet) { S.cur = ""; syncDerived(); renderSidebar(); saveDraft(); scheduleCheck(); }
 }
 function applyCfg(cfg, cur = "") {
-  S.cfg = {...DEFAULTS, ...cfg};
+  S.cfg = {...DEFAULTS, ...cfg, players: (cfg.players || []).map(p => ({...p}))};
   for (const k of Object.keys(S.cfg)) if (controls[k]) controls[k].set(S.cfg[k]);
   S.cur = cur;
-  renderSidebar(); saveDraft(); scheduleCheck(0);
+  syncDerived(); renderSidebar(); saveDraft(); scheduleCheck(0);
 }
 function saveDraft() { try { localStorage.setItem("soccerLauncher.draft", JSON.stringify(S.cfg)); } catch (e) { /* private mode */ } }
 function loadDraft() { try { return JSON.parse(localStorage.getItem("soccerLauncher.draft") || "null"); } catch (e) { return null; } }
@@ -191,19 +347,33 @@ function renderSidebar() {
   if (!st) return;
   const idle = !S.srv || S.srv.state === "idle";
   const pl = $("#presets");
-  pl.replaceChildren(...st.presets.map((p, i) => h("button", {
-    class: "item" + (S.cur === "preset:" + i ? " cur" : ""), type: "button", "aria-disabled": p.available ? null : "true",
-    title: p.available ? p.description : `${p.name}: ${p.blocked_reason}`,
-    onclick: () => p.available ? applyCfg({...p.config, rcap_root: S.cfg.rcap_root}, "preset:" + i) : toast(`${p.name}: ${p.blocked_reason}`, "warn")},
-    h("span", {class: "t"}, h("span", {text: p.name}), p.available ? null : h("span", {class: "soon", text: "soon"})),
-    h("span", {class: "d", text: p.description}))));
+  const lone = st.presets.filter(p => !(p.config && p.config.players && p.config.players.length));
+  const matchPresets = st.presets.filter(p => p.config && p.config.players && p.config.players.length);
+  const card = p => {
+    const i = st.presets.indexOf(p), n = p.config && p.config.players ? p.config.players.length : 0;
+    const cur = S.cur === "preset:" + i || (p.custom && S.cur === "" && isMatch(S.cfg));
+    return h("button", {
+      class: "item" + (cur ? " cur" : ""), type: "button", "aria-disabled": p.available ? null : "true",
+      title: p.available ? p.description : `${p.name}: ${p.blocked_reason}`,
+      onclick: () => {
+        if (!p.available) { toast(`${p.name}: ${p.blocked_reason}`, "warn"); return; }
+        if (p.custom && isMatch(S.cfg)) { S.cur = "preset:" + i; renderSidebar(); focusRoster(); return; }
+        applyCfg({...p.config, rcap_root: S.cfg.rcap_root}, "preset:" + i);
+        if (p.custom) focusRoster();
+      }},
+      h("span", {class: "t"}, h("span", {text: p.name}),
+        p.available ? (n ? h("span", {class: "count", text: p.custom ? "edit" : `${n} robots`}) : null) : h("span", {class: "soon", text: "soon"})),
+      h("span", {class: "d", text: p.description}));
+  };
+  pl.replaceChildren(h("div", {class: "group-label", text: "One robot"}), ...lone.map(card),
+    h("div", {class: "group-label", text: "Full match"}), ...matchPresets.map(card));
   const names = Object.keys(st.profiles);
   $("#profiles").replaceChildren(...(names.length ? names.map(n => h("div", {class: "item" + (S.cur === "profile:" + n ? " cur" : ""), role: "button", tabindex: "0",
       onclick: () => { applyCfg(st.profiles[n], "profile:" + n); $("#profile-name").value = n; },
       onkeydown: e => { if (e.key === "Enter") e.currentTarget.click(); }},
     h("span", {class: "t"}, h("span", {text: n}), h("button", {class: "x", type: "button", title: "Delete profile", "aria-label": "Delete profile " + n,
       onclick: async e => { e.stopPropagation(); if (confirm(`Delete profile "${n}"?`)) { const r = await api("/api/launcher/profile/delete", {name: n}); if (r.ok) { st.profiles = r.data.profiles; renderSidebar(); } } }, text: "×"})),
-    h("span", {class: "d", text: `${st.profiles[n].role} #${st.profiles[n].player_id} · ${st.profiles[n].match_mode}`})))
+    h("span", {class: "d", text: (st.profiles[n].players || []).length ? `match · ${st.profiles[n].players.length} robots` : `${st.profiles[n].role} #${st.profiles[n].player_id} · ${st.profiles[n].match_mode}`})))
     : [h("div", {class: "hint", text: "None yet. Name the current form and press Save."})]));
   $("#tools").replaceChildren(...st.tools.map(t => h("button", {class: "item", type: "button", title: t.description, disabled: idle ? null : "true", onclick: () => runTool(t.key)},
     h("span", {class: "t", text: t.label}), h("span", {class: "d", text: t.description}))));
@@ -366,6 +536,12 @@ const PAD_BUTTONS = {0: "a", 1: "b", 2: "x", 3: "y", 4: "lb", 5: "rb", 6: "lt", 
 const MODE_NAMES = {0: "damping", 1: "prepare", 2: "walking", 3: "custom", 4: "soccer"};
 const STATES = ["INITIAL", "READY", "SET", "PLAYING", "FINISHED", "SCHEDULE"];
 
+// In a match the stick, reset and placement requests go to the selected robot; a lone sim has no robot field.
+const withRobot = o => (S.status.robots ? {...o, robot: S.sel} : o);
+async function selectRobot(i) {
+  S.sel = i;
+  if (S.status.robots) { api("/api/select", {robot: i}); updateMarkers(); renderStatus(); renderPicks(); }
+}
 async function act(path, body, okMsg) {
   const r = await api(path, body);
   if (!r.ok) toast(r.status === 503 ? "The sim isn't running" : (r.data.error || `request failed (${r.status})`), "bad");
@@ -420,7 +596,7 @@ function ticker(fn, ms) {
 let joyBusy = false;
 function sendJoystick() {
   if (!S.ready || joyBusy || !S.srv || S.srv.state !== "running") return;
-  const state = {...joy};
+  const state = withRobot({...joy});
   for (const name of BUTTONS) state[name] = !!held[name];
   const pad = gamepadState();
   if (pad) {
@@ -454,7 +630,11 @@ function buildControls() {
   $("#apply").onclick = () => act("/api/referee", {set_play: $("#setplay").value, kicking: $("input[name=kicking]:checked").value, stopped: $("#stopped").checked}, "Set play applied");
   $("#fire-panel").onclick = () => act("/api/shoot", {});
   $("#reset-ball").onclick = () => placeBall(0, 0);
-  $("#reset-robot").onclick = () => act("/api/reset_robot", {});
+  $("#reset-robot").onclick = () => act("/api/reset_robot", withRobot({}));
+  $("#match-actions").append(
+    h("button", {class: "btn", type: "button", text: "Kickoff", title: "Ball to the centre spot, then READY → SET → PLAYING", onclick: () => act("/api/referee", {action: "kickoff"})}),
+    h("button", {class: "btn", type: "button", id: "next-half", text: "Next half", title: "End this half now", onclick: () => act("/api/referee", {action: "next_half"})}),
+    h("button", {class: "btn", type: "button", text: "Finish", title: "Full time", onclick: () => act("/api/referee", {action: "finish"})}));
   // Ball spots = the preset shot origins: within the keeper's ~8 m detection range, >= 2.5 m away so it still retreats.
   for (const [label, x, y] of BALL_SPOTS) $("#ball-spots").append(h("button", {class: "btn", type: "button", text: label, onclick: () => placeBall(x, y)}));
   for (const speed of [4, 6, 8]) {
@@ -482,7 +662,7 @@ const placeBall = (x, y) => act("/api/shoot", {x, y, speed: 0, direction_deg: 0,
 const NS = "http://www.w3.org/2000/svg";
 const L = 11.0015, W = 7.063;   // half length / half width of FD_ROBOLEAGUE
 const svgEl = (tag, attrs = {}, ...kids) => { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); e.append(...kids); return e; };
-let fieldG, ballEl, robotEl, ghostEl, aimEl;
+let fieldG, ballEl, robotEl, ghostEl, aimEl, botLayer, botEls = [], botKey = "";
 function buildPitch() {
   const svg = $("#pitch");
   svg.replaceChildren();
@@ -502,7 +682,8 @@ function buildPitch() {
   aimEl = svgEl("g", {visibility: "hidden"});
   ballEl = svgEl("circle", {class: "ball", r: .22, visibility: "hidden"});
   robotEl = svgEl("g", {visibility: "hidden"}, svgEl("circle", {class: "robot-body", r: .38}), svgEl("path", {class: "robot-body", d: "M.2 -.2L.75 0L.2 .2Z"}));
-  fieldG.append(ghostEl, aimEl, ballEl, robotEl);
+  botLayer = svgEl("g");
+  fieldG.append(ghostEl, aimEl, ballEl, robotEl, botLayer);
   svg.append(fieldG,
     svgEl("text", {x: -L + .4, y: W - .35}, "our goal"), svgEl("text", {x: L - .4, y: W - .35, "text-anchor": "end"}, "opponent"));
 }
@@ -515,7 +696,46 @@ function fieldPoint(e) {
 function updateMarkers() {
   const st = S.status;
   if (st.ball) { ballEl.setAttribute("cx", st.ball.x); ballEl.setAttribute("cy", st.ball.y); ballEl.setAttribute("visibility", "visible"); }
-  if (st.robot) { robotEl.setAttribute("transform", `translate(${st.robot.x} ${st.robot.y}) rotate(${st.robot.yaw * 180 / Math.PI})`); robotEl.setAttribute("visibility", "visible"); }
+  if (st.robots && st.robots.length) {
+    robotEl.setAttribute("visibility", "hidden");
+    const key = st.robots.map(r => r.label).join();
+    if (key !== botKey) {  // the lineup changed: rebuild the markers
+      botKey = key;
+      botLayer.replaceChildren();
+      botEls = st.robots.map(r => {
+        const body = svgEl("g", {}, svgEl("circle", {class: "robot-body", r: .38}), svgEl("path", {class: "robot-body", d: "M.2 -.2L.75 0L.2 .2Z"}));
+        const label = svgEl("text", {class: "bot-label", "text-anchor": "middle", "dominant-baseline": "central", transform: "scale(1,-1)"}, String(r.player_id));
+        const g = svgEl("g", {class: `bot ${r.team}`, "data-robot": r.index}, svgEl("circle", {class: "ring", r: .62}), body, label);
+        botLayer.append(g);
+        return {g, body};
+      });
+    }
+    st.robots.forEach((r, i) => {
+      const b = botEls[i];
+      b.g.setAttribute("transform", `translate(${r.x} ${r.y})`);
+      b.body.setAttribute("transform", `rotate(${r.yaw * 180 / Math.PI})`);
+      b.g.classList.toggle("sel", r.index === S.sel);
+      b.g.classList.toggle("down", !!r.fallen);
+    });
+  } else {
+    botKey = ""; botLayer.replaceChildren(); botEls = [];
+    if (st.robot) { robotEl.setAttribute("transform", `translate(${st.robot.x} ${st.robot.y}) rotate(${st.robot.yaw * 180 / Math.PI})`); robotEl.setAttribute("visibility", "visible"); }
+  }
+}
+let picksKey = "";
+function renderPicks() {
+  const box = $("#robot-picks"), robots = S.status.robots || [];
+  box.hidden = !robots.length;
+  if (!robots.length) { picksKey = ""; return; }
+  if (S.sel >= robots.length) S.sel = 0;
+  const key = robots.map(r => r.label + r.role).join();
+  if (key !== picksKey) {
+    picksKey = key;
+    box.replaceChildren(h("span", {class: "hint", text: "Drive / place:"}), ...robots.map(r => h("button", {
+      class: `pick ${r.team}`, type: "button", title: `${r.team} player ${r.player_id}, ${r.role.replace("_", " ")}`,
+      onclick: () => selectRobot(r.index)}, h("b", {text: r.label}), h("span", {text: r.role === "goal_keeper" ? "keeper" : r.role}))));
+  }
+  $$("button.pick", box).forEach((b, i) => { b.classList.toggle("on", i === S.sel); b.setAttribute("aria-pressed", String(i === S.sel)); });
 }
 const mapTool = () => $("input[name=maptool]:checked").value;
 const HINTS = {
@@ -548,6 +768,8 @@ function setupMap() {
   }
   svg.addEventListener("pointerdown", e => {
     if (!S.ready || e.button > 0) return;
+    const bot = e.target.closest && e.target.closest("[data-robot]");
+    if (bot) { selectRobot(Number(bot.getAttribute("data-robot"))); return; }  // clicking a robot selects it
     const p = fieldPoint(e), tool = mapTool();
     if (tool === "ball") { placeBall(p.x, p.y); $("#map-readout").textContent = `ball placed at (${fmt(p.x)}, ${fmt(p.y)}) m`; return; }
     svg.setPointerCapture(e.pointerId);
@@ -562,7 +784,7 @@ function setupMap() {
     if (!drag) return;
     const d = drag, p = fieldPoint(e), dist = Math.hypot(p.x - d.x, p.y - d.y);
     clear();
-    if (d.tool === "robot") await act("/api/reset_robot", {x: d.x, y: d.y, yaw: d.ang});
+    if (d.tool === "robot") await act("/api/reset_robot", withRobot({x: d.x, y: d.y, yaw: d.ang}));
     else if (dist < 0.3) toast("Drag away from the start point to aim the shot", "warn");
     else await act("/api/shoot", {x: d.x, y: d.y, speed: Number($("#shot-speed").value), direction_deg: d.ang * 180 / Math.PI, elevation_deg: Number($("#shot-elev").value)});
   });
@@ -572,23 +794,41 @@ function setupMap() {
 
 /* ---- status polling + rendering ---- */
 function tag(text, kind = "") { return h("span", {class: `tag ${kind}`, text}); }
+function fmtClock(secs) { secs = Math.max(0, Math.floor(secs || 0)); return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`; }
 function renderStatus() {
   const s = S.status, box = $("#status");
   if (!S.ready) { box.replaceChildren(h("p", {class: "hint", text: "Waiting for the sim…"})); return; }
+  const match = !!s.match;
+  const sel = match && s.robots ? s.robots[Math.min(S.sel, s.robots.length - 1)] : null;
   const stKind = {PLAYING: "good", READY: "warn", SET: "warn", INITIAL: "info", FINISHED: "bad"}[s.state] || "";
-  const rows = [
-    ["Referee", [tag(s.state || "–", stKind), s.set_play && s.set_play !== "NONE" ? tag(s.set_play, "warn") : null,
-      tag(s.kicking === "us" ? "we kick" : "opp. kicks"), s.stopped ? tag("stopped", "bad") : null,
-      s.set_play_secs_left ? tag(`${s.set_play_secs_left}s`) : null]],
-    ["Robot", [tag(MODE_NAMES[s.robot_mode] || String(s.robot_mode), s.robot_mode === 4 ? "good" : "warn"), s.visual_kick ? tag("kicking", "info") : null, s.manual_drive ? tag("manual drive", "info") : null]],
-    ["Brain decision", [tag(s.decision || "–", "info")]],
-    ["Shots", [tag(`goal ${(s.shots || {}).goal ?? 0}`, "good"), tag(`no goal ${(s.shots || {}).no_goal ?? 0}`), s.last_shot ? h("span", {class: "hint", text: `last: ${s.last_shot}`}) : null]],
+  const kick = match ? `${s.kicking_team} kicks` : (s.kicking === "us" ? "we kick" : "opp. kicks");
+  const rows = [];
+  if (match) {
+    rows.push(["Score", [h("span", {class: "score"}, h("span", {class: "home", text: `Home ${(s.score || {}).home ?? 0}`}), " – ", h("span", {class: "away", text: `${(s.score || {}).away ?? 0} Away`}))]],
+      ["Clock", [tag(s.continuous ? `${fmtClock(s.play_secs)} played` : fmtClock(s.secs_remaining) + " left"), s.continuous ? null : tag(`half ${s.first_half ? 1 : 2}`),
+        s.awaiting_start ? tag("press READY to start", "warn") : null]]);
+  }
+  rows.push(
+    ["Referee", [tag(s.state || "–", stKind), s.set_play && s.set_play !== "NONE" ? tag(s.set_play.replace("_", " "), "warn") : null,
+      tag(kick), s.stopped ? tag("stopped", "bad") : null, s.set_play_secs_left ? tag(`${s.set_play_secs_left}s`) : null]],
+    [sel ? `Robot ${sel.label}` : "Robot", [tag(MODE_NAMES[s.robot_mode] || String(s.robot_mode), s.robot_mode === 4 ? "good" : "warn"), s.visual_kick ? tag("kicking", "info") : null,
+      s.manual_drive ? tag("manual drive", "info") : null, sel && sel.fallen ? tag("fallen", "bad") : null]],
+    ["Brain decision", [tag(s.decision || "–", "info")]]);
+  if (!match) rows.push(["Shots", [tag(`goal ${(s.shots || {}).goal ?? 0}`, "good"), tag(`no goal ${(s.shots || {}).no_goal ?? 0}`), s.last_shot ? h("span", {class: "hint", text: `last: ${s.last_shot}`}) : null]]);
+  rows.push(
     ["Robot pose", [h("span", {text: s.robot ? `x ${fmt(s.robot.x)}  y ${fmt(s.robot.y)}  yaw ${fmt(s.robot.yaw * 180 / Math.PI, 0)}°` : "–"})]],
     ["Ball", [h("span", {text: s.ball ? `x ${fmt(s.ball.x)}  y ${fmt(s.ball.y)}` : "–"})]],
-    ["Sim rate", [tag(`${fmt(s.hz, 0)} Hz`, s.hz && s.hz < 45 ? "warn" : "")]],
-  ];
+    ["Sim rate", [tag(`${fmt(s.hz, 0)} Hz`, s.hz && s.hz < 45 ? "warn" : "")]]);
+  if (match && s.event) rows.push(["Last event", [h("span", {text: s.event})]]);
   box.replaceChildren(h("div", {class: "grid"}, rows.flatMap(([k, v]) => [h("div", {class: "k", text: k}), h("div", {class: "v"}, v)])));
   $$("#ref-states [data-state]").forEach(b => b.classList.toggle("cur", b.dataset.state === s.state));
+  $("#match-actions").hidden = !match;
+  $("#next-half").disabled = !!s.continuous;
+  $("#kick-opp").textContent = match ? "away kicks" : "opponent kicks";
+  $("#kick-us").textContent = match ? "home kicks" : "we kick";
+  $("#reset-robot").textContent = match ? "Robot to its start spot" : "Robot to goal centre";
+  $("#field-title").textContent = match ? "Field · home attacks →" : "Field";
+  renderPicks();
 }
 let polling = false;
 async function pollStatus() {
