@@ -27,7 +27,7 @@ STATIC = {
     "/style.css": ("style.css", "text/css; charset=utf-8"),
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
 }
-PROXY_POST = ("/api/joystick", "/api/referee", "/api/shoot", "/api/reset_robot")
+PROXY_POST = ("/api/joystick", "/api/referee", "/api/shoot", "/api/reset_robot", "/api/select")
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _NAME_RE = re.compile(r"^[^\x00-\x1f]{1,40}$")
 

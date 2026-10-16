@@ -156,7 +156,7 @@ class JobController:
             "last": last.to_dict(),
             "profiles": {k: v.to_dict() for k, v in sorted(self.store.profiles.items())},
             "presets": [{"name": p.name, "description": p.description, "available": p.available,
-                         "blocked_reason": p.blocked_reason,
+                         "blocked_reason": p.blocked_reason, "custom": p.custom,
                          "config": p.config.to_dict() if p.config else None} for p in PRESETS],
             "tools": [{"key": t.key, "label": t.label, "description": t.description} for t in TOOLS],
             "load_warning": self.store.load_warning,
