@@ -106,6 +106,56 @@ before setup and before every run.
   GPU. `SIM_CAMERA_GL=software` forces llvmpipe on any Linux (e.g. if EGL finds no usable GPU) and
   `SIM_CAMERA_GL=gpu` keeps the system driver. Export `MUJOCO_GL` to override the backend.
 
+## Control Centre (web launcher + controller)
+
+```bash
+pixi run launch               # serves http://127.0.0.1:8765/ and opens it
+pixi run launch --port 8800   # another port
+pixi run launch --last        # no UI: build if needed, then run the last saved config
+```
+
+One page to **launch and drive** the sim. Leave `pixi run launch` running; the page stays up between sim runs.
+
+![Launch tab](docs/media/launcher.png)
+
+**Launch tab.** Pick a preset or saved profile, or edit the form: role, player id, behaviour tree, quick vs
+full match, viewer, ball detector, spawn/ball positions, referee schedule, `SIM_VY_MAX`, GL backends,
+`ROS_DOMAIN_ID`, extra raw bridge/launch args. The side panel shows the rcap clone in use, the pre-flight
+checks (with a *Fix* button where there is one) and the exact command. *Tools* run `build-sim`, `build-ws`,
+`fetch-models`, the three test tasks and `scripts/setup.sh` with live output in the log drawer.
+
+**Control tab** (switches on by itself once the sim answers).
+
+![Control tab](docs/media/control_centre.png)
+
+- **Field map**: *Ball* tool, click to put the ball there. *Robot* tool, click to place the robot and drag to
+  set its heading. *Shot* tool, press at the start point (near the ball snaps to it), drag to aim, release to
+  fire; speed and elevation sliders. Live ball and robot markers. Field frame: our goal on the left, x towards
+  the opponent.
+- Everything the old controller page had: the two sticks and gamepad buttons (a connected gamepad is used
+  automatically), Stand up / Recalibrate / Auto combos, referee states and set plays, 6 ball spots and the
+  9 x 3 preset shots, reset buttons, and a rendered status panel (referee, robot mode, brain decision,
+  shot tally, pose, sim rate).
+
+How it works:
+
+- **rcap is built from whatever the clone has checked out**, found like `scripts/activate.sh` does
+  (`$ROBOTEDGE_ROOT`, the sibling `Robotedge-5v5-RCAP2026`, then `~/Robotedge-5v5-RCAP2026`, or the path
+  in *Advanced*). The launcher never fetches or checks out. It fingerprints `src/brain`, the message
+  packages and `patches/`, and runs the `build-sim` build only when that changed since the last
+  successful build (or turn on *Force rebuild*).
+- **Ports.** The launcher owns the port (8765). The sim's own controller server moves to an automatically
+  chosen internal port and the launcher proxies it, so the page is always same-origin. If a previous
+  launcher still holds the port, the new one stops it (and its sim) and takes over; if anything else holds
+  it, the launcher says so and exits without touching it.
+- **Saved state** is in `.launcher/state.json` (git-ignored): the last launched config, restored on the
+  next start, and your named profiles. Unsaved form edits survive a page reload.
+- The server only listens on 127.0.0.1, rejects foreign `Host`/`Origin` headers, and never uses a shell.
+- `pixi run keeper`, `keeper-quick` and `striker` still work on their own, with the bridge's simpler
+  controller page (below) on port 8765, when the launcher is not running.
+- The team presets (5v5, goalie vs 1 or 2 strikers, goalies only) are listed as *soon*: the sim has one
+  robot today, see [Known limitations](#known-limitations).
+
 ## Run
 
 ```bash
