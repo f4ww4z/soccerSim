@@ -55,6 +55,9 @@ def validate_roster(players: list[PlayerSpec]) -> list[str]:
     errs: list[str] = []
     if not players:
         return ["add at least one player"]
+    for p in players:
+        if p.team not in TEAMS:
+            errs.append(f"team must be {' or '.join(TEAMS)} (got {p.team!r})")
     for team in TEAMS:
         mine = [p for p in players if p.team == team]
         ids = [p.player_id for p in mine]
