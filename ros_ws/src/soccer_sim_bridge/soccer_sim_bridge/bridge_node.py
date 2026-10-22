@@ -396,7 +396,8 @@ def main(argv=None) -> None:
                 _run_realtime(node, viewer)
         elif use_viewer:
             link = ViewerLink(
-                node.sim.mj_model, node.sim.n_robot_ctrl, node.sim.mj_data.ctrl[node.sim.n_robot_ctrl:], env=viewer_env
+                node.sim.mj_model, node.sim.n_robot_ctrl, node.sim.mj_data.ctrl[node.sim.n_robot_ctrl:], env=viewer_env,
+                gl=os.environ.get("SIM_VIEWER_GL", "gpu"),
             )
             _run_realtime(node, None, link)
         else:

@@ -5,13 +5,18 @@ import math
 import re
 from dataclasses import asdict, dataclass, field, fields
 
+from soccer_sim.roster import AWAY, HOME, PlayerSpec, standard_team, validate_roster
+
 ROLES = ("goal_keeper", "striker", "defender")
 TREES = ("game.xml", "chase.xml", "demo.xml")
 DETECTORS = ("yolo", "ground_truth")
 CAMERA_GL = ("auto", "software", "gpu")
+GRAPHICS = ("gpu", "cpu")  # what draws the MuJoCo viewer window
 MUJOCO_GL = ("", "egl", "glfw", "osmesa")
 MATCH_MODES = ("quick", "full")
 GOALKEEPER_ID = 1  # brain forces this player id to be the keeper whatever `role` says
+DEFAULT_DOMAIN_BASE = 70  # match runs use one ROS domain per robot, counting up from here
+MAX_ROBOTS = 10
 
 _SCHEDULE_RE = re.compile(r"^\d:\d+(\.\d+)?(,\d:\d+(\.\d+)?)*$")
 
@@ -24,6 +29,12 @@ class LaunchConfig:
     tree: str = "game.xml"
     match_mode: str = "quick"  # quick: scripted referee, soccer mode; full: real match procedure
     viewer: bool = True
+    graphics: str = "gpu"  # viewer window: your graphics card, or "cpu" = Mesa software rendering (Linux only)
+    # Match: a roster of {team: home|away, player_id, role} plays a whole game (empty = the single robot above)
+    players: list = field(default_factory=list)
+    half_minutes: float = 10.0
+    continuous: bool = False  # no halves or clock limit
+    detailed_bodies: bool = False  # viewer: real T2 meshes instead of simple team-coloured bodies (slow with many robots)
     # Perception
     ball_detector: str = "yolo"
     # Field & referee (empty/None = bridge default)
@@ -42,10 +53,19 @@ class LaunchConfig:
     extra_bridge_args: str = ""
     extra_launch_args: str = ""
 
+    @property
+    def is_match(self) -> bool:
+        return bool(self.players)
+
+    def roster(self) -> list[PlayerSpec]:
+        return [PlayerSpec.from_dict(p) for p in self.players if isinstance(p, dict)]
+
     def validate(self) -> list[str]:
         """Human-readable problems; an empty list means launchable."""
         errs: list[str] = []
-        if self.role not in ROLES:
+        if self.is_match:
+            errs += self._validate_match()
+        elif self.role not in ROLES:
             errs.append(f"role must be one of {', '.join(ROLES)}")
         if self.tree not in TREES:
             errs.append(f"tree must be one of {', '.join(TREES)}")
@@ -53,9 +73,13 @@ class LaunchConfig:
             errs.append("match mode must be quick or full")
         if self.ball_detector not in DETECTORS:
             errs.append(f"ball detector must be one of {', '.join(DETECTORS)}")
+        if self.graphics not in GRAPHICS:
+            errs.append("graphics must be gpu or cpu")
         if self.camera_gl not in CAMERA_GL:
             errs.append(f"camera GL must be one of {', '.join(CAMERA_GL)}")
-        if not 1 <= self.player_id <= 5:
+        if self.is_match:
+            pass
+        elif not 1 <= self.player_id <= 5:
             errs.append("player id must be 1-5")
         elif self.player_id == GOALKEEPER_ID and self.role != "goal_keeper":
             errs.append("player 1 is always the keeper; use player id 2-5 for a striker/defender")
@@ -73,6 +97,20 @@ class LaunchConfig:
                 errs.append(f"{name} must be a finite number")
         return errs
 
+    def _validate_match(self) -> list[str]:
+        errs: list[str] = []
+        if not all(isinstance(p, dict) for p in self.players):
+            return ["players must be a list of {team, player_id, role}"]
+        errs += validate_roster(self.roster())
+        if len(self.players) > MAX_ROBOTS:
+            errs.append(f"at most {MAX_ROBOTS} robots")
+        if not (self.continuous or (math.isfinite(self.half_minutes) and 0.1 <= self.half_minutes <= 60)):
+            errs.append("half length must be 0.1-60 minutes")
+        base = self.ros_domain_id if self.ros_domain_id is not None else DEFAULT_DOMAIN_BASE
+        if base + len(self.players) - 1 > 232:
+            errs.append(f"each robot needs its own ROS domain: {base} + {len(self.players)} robots goes past 232")
+        return errs
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -86,11 +124,17 @@ class LaunchConfig:
             if f is None:
                 continue
             default = getattr(base, key)
+            if key == "players":
+                if isinstance(value, list):
+                    base.players = [_clean_player(p) for p in value if isinstance(p, dict)]
+                continue
             try:
                 if isinstance(default, bool):
                     value = bool(value) if isinstance(value, bool) else default
                 elif isinstance(default, int):
                     value = int(value)
+                elif isinstance(default, float):
+                    value = float(value)
                 elif isinstance(default, str):
                     value = str(value)
                 elif default is None:  # optional number
@@ -103,19 +147,38 @@ class LaunchConfig:
         return base
 
 
+def _clean_player(p: dict) -> dict:
+    try:
+        return {"team": str(p.get("team", HOME)), "player_id": int(p.get("player_id", 0)), "role": str(p.get("role", ""))}
+    except (TypeError, ValueError):
+        return {"team": HOME, "player_id": 0, "role": ""}
+
+
 @dataclass(frozen=True)
 class Preset:
     name: str
     description: str
     config: LaunchConfig | None = None  # None => not launchable yet
     blocked_reason: str = ""
+    custom: bool = False  # the roster editor's starting point: picking it opens the editor
 
     @property
     def available(self) -> bool:
         return self.config is not None
 
 
-_NEEDS_MULTI = "needs the multi-robot sim (today's sim has exactly one robot)"
+def _players(home_ids=(), away_ids=(), away_roles=None) -> list[dict]:
+    roster = standard_team(HOME, home_ids) + standard_team(AWAY, away_ids)
+    if away_roles:  # {player_id: role} for the away side
+        roster = [PlayerSpec(p.team, p.player_id, away_roles.get(p.player_id, p.role)) if p.team == AWAY else p
+                  for p in roster]
+    return [p.to_dict() for p in roster]
+
+
+def _match(players: list[dict], **kw) -> LaunchConfig:
+    # Several robots cannot each render a camera and run YOLO in real time: perfect ball detection by default.
+    return LaunchConfig(players=players, ball_detector="ground_truth", match_mode="quick", **kw)
+
 
 PRESETS: tuple[Preset, ...] = (
     Preset("Lone keeper", "Goalkeeper, real match procedure + viewer (pixi run keeper)",
@@ -128,8 +191,15 @@ PRESETS: tuple[Preset, ...] = (
            LaunchConfig(role="striker", player_id=2, match_mode="full")),
     Preset("Keeper, ground-truth ball", "Keeper quick with perfect ball detection (debug the brain, not YOLO)",
            LaunchConfig(role="goal_keeper", player_id=1, match_mode="quick", ball_detector="ground_truth")),
-    Preset("Team vs team (5v5)", "2 teams of 5", None, _NEEDS_MULTI),
-    Preset("Goalie vs 1 striker", "1 goalie against 1 opponent striker", None, _NEEDS_MULTI),
-    Preset("Goalie vs 2 strikers", "1 goalie against 2 opponent strikers", None, _NEEDS_MULTI),
-    Preset("Goalies only", "Both teams' goalies only", None, _NEEDS_MULTI),
+    Preset("Team vs team (5v5)", "Full match: 2 teams of 5, referee, two halves",
+           _match(_players((1, 2, 3, 4, 5), (1, 2, 3, 4, 5)))),
+    Preset("5 robots, no opponents", "One team of 5 on the pitch alone: practise attack and formations",
+           _match(_players((1, 2, 3, 4, 5)))),
+    Preset("Goalie vs 1 striker", "1 goalie against 1 opponent striker",
+           _match(_players((1,), (2,)), continuous=True)),
+    Preset("Goalie vs 2 strikers", "1 goalie against 2 opponent strikers",
+           _match(_players((1,), (2, 3)), continuous=True)),
+    Preset("Goalies only", "Both teams' goalies only", _match(_players((1,), (1,)), continuous=True)),
+    Preset("Custom match", "Build your own: pick who is on the pitch, their team and role",
+           _match(_players((1, 2), (2,)), continuous=True), custom=True),
 )

@@ -48,13 +48,14 @@
     <div class="col-map">
       <div class="card map-card">
         <div class="map-head">
-          <h2>Field</h2>
+          <h2 id="field-title">Field</h2>
           <div class="seg" role="radiogroup" aria-label="Map tool" id="map-tools">
             <label><input type="radio" name="maptool" value="ball" checked><span>● Ball</span></label>
             <label><input type="radio" name="maptool" value="robot"><span>➤ Robot</span></label>
             <label><input type="radio" name="maptool" value="shot"><span>↗ Shot</span></label>
           </div>
         </div>
+        <div class="picks" id="robot-picks" hidden></div>
         <svg id="pitch" viewBox="-12.2 -7.9 24.4 15.8" role="img" aria-label="Top-down field. Our goal is on the left."></svg>
         <p class="hint" id="map-hint"></p>
         <div class="shot-controls" id="shot-controls">
@@ -73,9 +74,10 @@
       <div class="card"><h2>Status</h2><div id="status"></div></div>
       <div class="card"><h2>Referee</h2>
         <div class="btn-row" id="ref-states"></div>
+        <div class="btn-row match-actions" id="match-actions" hidden></div>
         <div class="ref-form">
           <label>Set play <select id="setplay"><option>NONE</option><option>DIRECT_FREE_KICK</option><option>INDIRECT_FREE_KICK</option><option>PENALTY_KICK</option><option>THROW_IN</option><option>GOAL_KICK</option><option>CORNER_KICK</option></select></label>
-          <div class="seg" role="radiogroup" aria-label="Who kicks"><label><input type="radio" name="kicking" value="opponent" checked><span>opponent kicks</span></label><label><input type="radio" name="kicking" value="us"><span>we kick</span></label></div>
+          <div class="seg" role="radiogroup" aria-label="Who kicks"><label><input type="radio" name="kicking" value="opponent" checked><span id="kick-opp">opponent kicks</span></label><label><input type="radio" name="kicking" value="us"><span id="kick-us">we kick</span></label></div>
           <label class="check"><input type="checkbox" id="stopped"> stopped (ball being placed)</label>
           <button class="btn" id="apply">Apply set play</button>
         </div></div>

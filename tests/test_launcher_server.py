@@ -107,7 +107,7 @@ def test_pages_and_state(stack):
     st, state = req(stack, "GET", "/api/launcher/state")
     assert st == 200 and state["state"] == "idle"
     assert any(p["name"] == "Lone keeper" and p["available"] for p in state["presets"])
-    assert any(not p["available"] for p in state["presets"])
+    assert any(p["config"]["players"] for p in state["presets"]) and all(p["available"] for p in state["presets"])
     assert {t["key"] for t in state["tools"]} >= {"build-sim", "fetch-models"}
     assert req(stack, "GET", "/api/launcher/identity")[1]["app"] == "soccer-launcher"
 

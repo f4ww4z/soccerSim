@@ -40,16 +40,27 @@ def _cmdline(pid: int) -> str:
     try:
         return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace").strip()
     except OSError:
+        pass
+    try:  # macOS has no /proc
+        return subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
+                              timeout=3).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
         return ""
 
 
 def _ss_holder(port: int) -> str:
-    """Best-effort 'who listens here' for the error message (Linux `ss`)."""
-    try:
-        out = subprocess.run(["ss", "-H", "-ltnp", f"sport = :{port}"], capture_output=True, text=True, timeout=3).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return out.strip().splitlines()[0] if out.strip() else ""
+    """Best-effort 'who listens here' for the error message (Linux `ss`, else `lsof` as on macOS)."""
+    for argv in (["ss", "-H", "-ltnp", f"sport = :{port}"], ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"]):
+        try:
+            out = subprocess.run(argv, capture_output=True, text=True, timeout=3).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        lines = out.splitlines()
+        if argv[0] == "lsof" and len(lines) > 1:
+            lines = lines[1:]  # skip lsof's header
+        if lines:
+            return lines[0]
+    return ""
 
 
 def identify(port: int, timeout: float = 1.5) -> Holder:

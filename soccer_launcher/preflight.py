@@ -55,8 +55,42 @@ def run(cfg: LaunchConfig, info: RcapInfo, stale: bool, root: Path | None = None
     if cfg.viewer and platform == "Linux" and not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")) \
             and not Path("/tmp/.X11-unix/X0").exists():
         out.append(Check("warn", "viewer is on but no display found (DISPLAY/WSLg)"))
-    if cfg.ros_domain_id is None and not env.get("ROS_DOMAIN_ID"):
+    if cfg.viewer and cfg.graphics == "cpu":
+        if platform == "Darwin":
+            out.append(Check("warn", "graphics: CPU only applies on Linux; the viewer on macOS always uses the system's graphics"))
+        else:
+            out.append(Check("warn", "the viewer is drawn by the CPU (software rendering) and will be slow with several robots; "
+                                     "GPU is the default"))
+    if cfg.is_match:
+        out += _match_checks(cfg, platform)
+    elif cfg.ros_domain_id is None and not env.get("ROS_DOMAIN_ID"):
         out.append(Check("warn", "default ROS domain: two sims at once would cross-talk (set a ROS_DOMAIN_ID)"))
+    return out
+
+
+def _has_default_route(route_file: str = "/proc/net/route") -> bool:
+    try:
+        with open(route_file) as f:
+            return any(line.split()[1] == "00000000" for line in list(f)[1:] if len(line.split()) > 1)
+    except OSError:
+        return True  # cannot tell (not Linux): do not nag
+
+
+def _match_checks(cfg: LaunchConfig, platform: str) -> list[Check]:
+    n = len(cfg.players)
+    out = [Check("ok", f"match: {sum(p.get('team') == 'home' for p in cfg.players)} home, "
+                       f"{sum(p.get('team') == 'away' for p in cfg.players)} away ({n} robot{'s' if n != 1 else ''}, one ROS domain each)")]
+    if cfg.ball_detector == "yolo" and n > 1:
+        total = 25 if n <= 5 else 12.5  # camera frames the sim can render per second while holding 50 Hz
+        out.append(Check("warn", f"YOLO with {n} robots: the sim can render about {total:g} camera frames a second in "
+                                 f"total, so each robot's camera updates only {total / n:.1f} times a second. "
+                                 "Ground truth ball gives every robot full-rate perception"))
+    if cfg.detailed_bodies and cfg.viewer and n > 2:
+        out.append(Check("warn", f"detailed robot bodies: {n} robots are about {n} million triangles, so the viewer "
+                                 "will trail the sim. The simple team-coloured bodies stay smooth"))
+    if platform == "Linux" and not _has_default_route():
+        out.append(Check("warn", "no network route: teammates find each other over UDP and may not connect "
+                                 "(connect to any network, even without internet)"))
     return out
 
 
