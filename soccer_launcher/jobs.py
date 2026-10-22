@@ -218,8 +218,8 @@ class JobController:
         except Exception as e:  # surface instead of dying silently on the worker thread
             self.log(f"launcher error: {type(e).__name__}: {e}")
         finally:
+            self._safe_refresh()  # before going idle, so whoever waits for idle sees the new build status
             self._set_state("idle")
-            self._safe_refresh()
 
     def run_tool(self, key: str, rcap_root_text: str = "") -> dict:
         tool = TOOLS_BY_KEY.get(key)
@@ -243,8 +243,8 @@ class JobController:
         except Exception as e:
             self.log(f"launcher error: {type(e).__name__}: {e}")
         finally:
+            self._safe_refresh()  # before going idle, so whoever waits for idle sees the new build status
             self._set_state("idle")
-            self._safe_refresh()
 
     def _safe_refresh(self) -> None:
         try:

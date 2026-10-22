@@ -36,4 +36,7 @@ ros2 launch soccer_sim_bridge match.launch.py roster:="$ROSTER" "$@" &
 LAUNCH_PID=$!
 trap 'kill $BRIDGE_PID $LAUNCH_PID 2>/dev/null || true' EXIT
 # The match is over when either side is: brains without a bridge (or a bridge without brains) are useless.
-wait -n $BRIDGE_PID $LAUNCH_PID || true
+# Polled rather than `wait -n`, which macOS's bash 3.2 does not have.
+while kill -0 "$BRIDGE_PID" 2>/dev/null && kill -0 "$LAUNCH_PID" 2>/dev/null; do
+  sleep 1
+done
