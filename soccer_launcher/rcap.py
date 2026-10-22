@@ -13,7 +13,12 @@ REPO_NAME = "Robotedge-5v5-RCAP2026"
 # What scripts/setup_ws.sh consumes from the rcap tree.
 _RCAP_INPUTS = ("src/brain", "src/booster_msgs", "src/booster_ros2_interface", "src/robocup_ros2_interface")
 # Build-affecting files that live in soccerSim itself (relative to its root).
-_LOCAL_INPUTS = ("patches", "scripts/setup_ws.sh", "scripts/build_rerun.sh")
+_LOCAL_INPUTS = (
+    "patches", "scripts/setup_ws.sh", "scripts/build_rerun.sh",
+    # soccer_sim_bridge's Python is symlink-installed, but new launch files and entry points need colcon.
+    "ros_ws/src/soccer_sim_bridge/launch", "ros_ws/src/soccer_sim_bridge/setup.py",
+    "ros_ws/src/soccer_sim_bridge/setup.cfg", "ros_ws/src/soccer_sim_bridge/package.xml",
+)
 _SKIP_DIRS = {"build", "install", "log", "__pycache__", ".git"}
 
 

@@ -252,7 +252,8 @@ class MatchBridge:
         now = time.monotonic()
         with self.lock:
             if action == "kickoff":
-                self.world.reset_ball(0.0, 0.0)
+                # Queued like every other web action: mj_data belongs to the tick thread (world.step runs unlocked).
+                self._pending_shots.append(Shot(0.0, 0.0, 0.0, 0.0, 0.0))
                 self.gc.override(now, state="READY")
                 self.gc.override(now, state="SCHEDULE")
             elif action == "next_half":

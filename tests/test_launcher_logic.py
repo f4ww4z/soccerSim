@@ -256,6 +256,15 @@ def test_fingerprint_tracks_inputs_not_build_dirs(fake_rcap, fake_local):
     assert rcap.fingerprint(fake_rcap, fake_local) != changed
 
 
+def test_fingerprint_tracks_new_bridge_launch_files(fake_rcap, fake_local):
+    # A pulled bridge change that adds a launch file needs colcon even though the Python is symlinked.
+    base = rcap.fingerprint(fake_rcap, fake_local)
+    launch = fake_local / "ros_ws" / "src" / "soccer_sim_bridge" / "launch"
+    launch.mkdir(parents=True)
+    (launch / "match.launch.py").write_text("x")
+    assert rcap.fingerprint(fake_rcap, fake_local) != base
+
+
 def test_build_staleness_lifecycle(fake_rcap, fake_local, tmp_path):
     ld = tmp_path / ".launcher"
     st = build.check(fake_rcap, ld, fake_local)

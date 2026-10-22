@@ -41,6 +41,7 @@ def test_standard_roster_is_valid_and_keeper_is_player_one():
     ([PlayerSpec(HOME, 1, "striker")], "always the goalkeeper"),
     ([PlayerSpec(HOME, 6, "striker")], "ids are 1-5"),
     ([PlayerSpec(HOME, 2, "wizard")], "role must be one of"),
+    ([PlayerSpec(HOME, 1, "goal_keeper"), PlayerSpec("Away", 2, "striker")], "team must be home or away"),
 ])
 def test_roster_problems_are_plain_language(players, fragment):
     assert any(fragment in e for e in validate_roster(players))
